@@ -15,7 +15,8 @@
 5. [Decisões algorítmicas e validações](#5-decisões-algorítmicas-e-validações)
 6. [Filtros de qualidade](#6-filtros-de-qualidade)
 7. [Pipeline completo de execução](#7-pipeline-completo-de-execução)
-8. [Limitações identificadas](#8-limitações-identificadas)
+8. [Bancada de testes controlados](#8-bancada-de-testes-controlados)
+9. [Limitações identificadas](#9-limitações-identificadas)
 
 ---
 
@@ -30,13 +31,15 @@ O **Harmonic Product Spectrum (HPS)** estima a frequência de rotação dominant
 ## 2. Estrutura do repositório
 
 ```
-artigo/
+TCC/
 ├── coletor.py            # Coleta FFTs da API Melvin/Influx e salva em JSON
 ├── hps_analysis.ipynb    # Notebook de análise: HPS, visualizações, tabelas
 ├── README.md             # Este arquivo
+├── requirements.txt      # Dependências Python
 └── dados/
-    ├── equipamentos.json         # Catálogo de equipamentos com sensores
-    └── ffts/{serialNumber}.json  # Melhor medição selecionada por sensor
+    ├── equipamentos.json              # Catálogo de equipamentos com sensores
+    ├── ffts/{serialNumber}.json       # Melhor medição selecionada por sensor (campo geral)
+    └── bancada/{serialNumber}.json    # Medições da bancada de testes (22/05/2026)
 ```
 
 ---
@@ -70,22 +73,34 @@ Com `--max-scan 20` (padrão antigo), todos os snapshots selecionados podiam ser
 | `--max-equip` | 100 | Limite de equipamentos para coleta FFT |
 | `--serie` | — | Modo série histórica (para análise temporal) |
 | `--dias` | 30 | Dias de histórico no modo `--serie` |
+| `--serials` | — | Lista de serialNumbers separados por vírgula — coleta apenas esses sensores (sem consultar `--max-equip`) |
+| `--data-inicio` | — | Início da janela em ISO 8601 UTC; substitui `--janela`/`--dias` e ativa modo série |
+| `--data-fim` | — | Fim da janela em ISO 8601 UTC (par obrigatório de `--data-inicio`) |
+| `--output-dir` | `dados/ffts` | Diretório de saída para os arquivos JSON coletados |
 
 ### 3.4 Execução
 
 ```bash
 # Ativar ambiente virtual
-source /media/jarbas/Arquivos/CienciaDeDados/venvs/tcc/bin/activate
+source /media/jarbas/Arquivos/CienciaDeDados/venvs/hps/bin/activate
 
 # Coleta padrão — melhor snapshot dos últimos 3 dias
-cd artigo/
 python coletor.py
 
 # Ampliar janela
 python coletor.py --janela 7
 
-# Série histórica para análise temporal (seção 6.3 do notebook)
+# Série histórica para análise temporal
 python coletor.py --serie --dias 30
+
+# Coleta direcionada — sensores específicos em janela temporal precisa (bancada de testes)
+python coletor.py \
+    --serie \
+    --serials 24097747,23253979,23253865 \
+    --data-inicio 2026-05-22T19:00:00Z \
+    --data-fim    2026-05-22T22:00:00Z \
+    --max-docs 500 \
+    --output-dir dados/bancada
 ```
 
 ---
@@ -270,7 +285,78 @@ RMS_MINIMO      = 0.05   # mm/s — aviso de sinal fraco no título do gráfico
 
 ---
 
-## 8. Limitações identificadas
+## 8. Bancada de testes controlados
+
+### 8.1 Configuração
+
+Em 22/05/2026, três sensores Melvin foram instalados em equipamentos de características conhecidas para validação controlada:
+
+| Serial | Equipamento | Tipo | RPM nominal | Observações |
+|---|---|---|---|---|
+| **24097747** | Motor WEG W22 IR3 Premium | Motor elétrico | 1780 | 0,37 kW, 4 polos, 60 Hz; rolamentos 6202 ZZ; com inversor Allen-Bradley PowerFlex 40 |
+| **23253979** | Bomba piscina | Bomba centrífuga | 1780 | Velocidade fixa; sem inversor |
+| **23253865** | Exaustor F02-531-MB001 | Ventilador | — (não cadastrado) | Velocidade fixa; RPM real desconhecido |
+
+O motor estava conectado a um inversor de frequência configurado em **39,3 Hz** e **60,0 Hz** em diferentes momentos do teste (observado no display do VFD). Isso equivale a rotações teóricas de ~2358 RPM (a 39,3 Hz) e ~1700 RPM (a 60 Hz, com deslizamento típico para 4 polos).
+
+Janela de operação planejada: **22/05/2026 16:00–19:00 BRT (19:00–22:00 UTC).**
+
+### 8.2 Dados coletados
+
+A coleta foi feita com os novos parâmetros `--serials` e `--data-inicio`/`--data-fim` do coletor:
+
+```bash
+python coletor.py \
+    --serie \
+    --serials 24097747,23253979,23253865 \
+    --data-inicio 2026-05-22T19:00:00Z \
+    --data-fim    2026-05-22T22:00:00Z \
+    --max-docs 500 \
+    --output-dir dados/bancada
+```
+
+Resultados da coleta na janela de teste:
+
+| Serial | Docs coletados | Observação |
+|---|---|---|
+| 24097747 | 0 | Sensor sem transmissões na janela; primeiro dado registrado a partir de 23/05/2026 02:14 UTC |
+| 23253979 | 3 | Baixa frequência de amostragem; dados presentes na janela |
+| 23253865 | 88 | Sensor ativo; cobertura completa da janela |
+
+### 8.3 Análise HPS — resultados
+
+O filtro `VEL_PICO_MINIMO = 2,0 mm/s` foi aplicado verificando o pico **acima de F_CUTOFF = 10 Hz**:
+
+| Serial | Equipamento | Docs aprovados | Pico > 10 Hz | RPM estimado (HPS) | Desvio padrão | Confiança |
+|---|---|---|---|---|---|---|
+| 24097747 | Motor WEG + VFD | — | n/a (sem dados) | n/a | — | — |
+| 23253979 | Bomba piscina | 0/3 | 0,97 mm/s máx | — (reprovado) | — | — |
+| 23253865 | Exaustor | 80/88 | 6,27 mm/s | **2671,9 RPM (44,53 Hz)** | 0,0 RPM | 7,14 |
+
+### 8.4 Interpretação
+
+**Motor (24097747):** O sensor não transmitiu dados durante a janela de teste planejada. Dados posteriores (23–24/05) mostram perfil 1/f puro, com pico global em 0,781 Hz e energia acima de 10 Hz inferior a 0,12 mm/s. Isso indica que o motor estava operando em carga muito leve — insuficiente para gerar vibração rotacional detectável pelo sensor. O filtro de atividade funciona corretamente: rejeita o sensor quando não há informação de rotação utilizável.
+
+**Bomba piscina (23253979):** Apenas 3 medições na janela. O maior pico acima de 10 Hz foi 0,97 mm/s — abaixo do limiar. Perfil com picos em ~172 Hz e ~409 Hz, sem harmônica clara de rotação identificável. O sensor pode estar em posição de montagem desfavorável (acoplamento de vibração fraco) ou a bomba gera vibração predominantemente abaixo de 10 Hz.
+
+**Exaustor (23253865):** O resultado mais expressivo do teste. O HPS identificou o mesmo pico fundamental (44,531 Hz = 2671,9 RPM) em **100% dos 80 documentos aprovados**, com desvio padrão de 0 RPM. Isso demonstra a consistência e repetibilidade do algoritmo em condições reais de operação estacionária. A estrutura harmônica do espectro é: 1× = 44,53 Hz (pico dominante, 6,3 mm/s) e 4× = 178,1 Hz (segundo pico, 1,1 mm/s), padrão típico de ventilador com 4 pás (frequência de passagem de pá = 4× a rotação).
+
+### 8.5 Parâmetros do coletor para coleta direcionada
+
+A versão atual do coletor suporta coleta direcionada por serial e janela temporal precisa:
+
+| Parâmetro | Descrição |
+|---|---|
+| `--serials` | Lista de serialNumbers separados por vírgula |
+| `--data-inicio` | Início em ISO 8601 UTC (ex: `2026-05-22T19:00:00Z`) |
+| `--data-fim` | Fim em ISO 8601 UTC |
+| `--output-dir` | Diretório de saída (padrão: `dados/ffts`) |
+
+Quando `--data-inicio` e `--data-fim` são fornecidos, substituem `--janela`/`--dias` e o modo série é ativado automaticamente.
+
+---
+
+## 9. Limitações identificadas
 
 | Limitação | Descrição | Impacto |
 |---|---|---|
